@@ -26,6 +26,7 @@ from models.ctx_encoder import MlpContextEncoder
 class RnnModel(nn.Module):
     corpus_ty = data.WordCorpus
     engine_ty = RnnEngine
+
     def __init__(self, word_dict, item_dict, context_dict, count_dict, args):
         super(RnnModel, self).__init__()
 
@@ -142,7 +143,8 @@ class RnnModel(nn.Module):
         inpt_emb = torch.cat([inpt_emb, ctx_h_rep], 2)
 
         # Finally read in the words
-        out, lang_h = self.reader(inpt_emb, lang_h)
+        # out, lang_h = self.reader(inpt_emb, lang_h)
+        out = self.reader(inpt_emb)
 
         return out, lang_h
 
