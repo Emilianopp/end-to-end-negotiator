@@ -45,7 +45,7 @@ class SelfPlay(object):
                 self.logger.dump('%d: %s' % (n, self.dialog.show_metrics()), forced=True)
 
 
-def get_agent_type(model, smart=False):
+def get_agent_type(model, smart=False, reinforce = False):
     if isinstance(model, LatentClusteringPredictionModel):
         if smart:
             return LatentClusteringRolloutAgent
@@ -53,7 +53,10 @@ def get_agent_type(model, smart=False):
             return LatentClusteringAgent
     elif isinstance(model, RnnModel):
         if smart:
+            # return RnnMCTSAgent
             return RnnRolloutAgent
+        elif reinforce:
+            return RlAgent
         else:
             return RnnAgent
     elif isinstance(model, BaselineClusteringModel):
@@ -125,7 +128,7 @@ def main():
         help='plot graphs')
 
     args = parser.parse_args()
-
+    
     utils.use_cuda(args.cuda)
     utils.set_seed(args.seed)
 
