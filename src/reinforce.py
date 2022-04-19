@@ -48,6 +48,7 @@ class Reinforce(object):
                 self.engine.model.eval()
 
             self.logger.dump('=' * 80)
+            self.engine.model.train()
             self.dialog.run(ctxs, self.logger)
             self.logger.dump('=' * 80)
             self.logger.dump('')
@@ -55,7 +56,7 @@ class Reinforce(object):
                 self.logger.dump('%d: %s' % (n, self.dialog.show_metrics()), forced=True)
 
         def dump_stats(dataset, stats, name):
-            loss, select_loss = self.engine.valid_pass(N, dataset, stats)
+            loss, select_loss, _ , _ = self.engine.valid_pass(dataset, stats)
             self.logger.dump('final: %s_loss %.3f %s_ppl %.3f' % (
                 name, float(loss), name, np.exp(float(loss))),
                 forced=True)
@@ -93,7 +94,7 @@ def main():
         help='successful dialog should have more than score_threshold in score')
     parser.add_argument('--log_file', type=str, default='',
         help='log successful dialogs to file for training')
-    parser.add_argument('--smart_bob', action='store_true', default=False,
+    parser.add_argument('--smart_bob', action='store_true', default=True,
         help='make Bob smart again')
     parser.add_argument('--gamma', type=float, default=0.99,
         help='discount factor')
@@ -142,14 +143,16 @@ def main():
     utils.set_seed(args.seed)
 
     alice_model = utils.load_model(args.alice_model_file)
-    alice_ty = get_agent_type(alice_model)
-    alice = alice_ty(alice_model, args, name='Alice', train=True)
+    # alice needs to be a RLAgent
+    alice_ty = get_agent_type(alice_model, reinforce=True)
+    alice = alice_ty(alice_model, args =args, name='Alice', train=True)
     alice.vis = args.visual
-
+    
     bob_model = utils.load_model(args.bob_model_file)
-    bob_ty = get_agent_type(bob_model)
-    bob = bob_ty(bob_model, args, name='Bob', train=False)
-
+    # bob should be a rollout agent
+    bob_ty = get_agent_type(bob_model, smart = True)
+    bob = bob_ty(bob_model, args = args, name='Bob', train=False)
+    
     dialog = Dialog([alice, bob], args)
     logger = DialogLogger(verbose=args.verbose, log_file=args.log_file)
     ctx_gen = ContextGenerator(args.context_file)
