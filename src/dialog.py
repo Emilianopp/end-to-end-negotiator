@@ -146,6 +146,7 @@ class Dialog(object):
         return ' '.join(['%s=%s' % (k, v) for k, v in self.metrics.dict().items()])
 
     def run(self, ctxs, logger, max_words=5000):
+        self.agents[0].model.train()
         assert len(self.agents) == len(ctxs)
         for agent, ctx, partner_ctx in zip(self.agents, ctxs, reversed(ctxs)):
             agent.feed_context(ctx)
@@ -166,7 +167,7 @@ class Dialog(object):
         words_left = max_words
         length = 0
         expired = False
-
+        
         while True:
             out = writer.write(max_words=words_left)
             words_left -= len(out)
@@ -176,7 +177,7 @@ class Dialog(object):
             if 'full_match' in self.metrics.metrics:
                 self.metrics.record('full_match', out)
             self.metrics.record('%s_unique' % writer.name, out)
-
+            
             conv.append(out)
             reader.read(out)
             if not writer.human:
@@ -191,8 +192,8 @@ class Dialog(object):
                 break
 
             writer, reader = reader, writer
-
-
+            
+        
         choices = []
         for agent in self.agents:
             choice = agent.choose()
@@ -208,7 +209,7 @@ class Dialog(object):
             logger.dump_reward(agent.name, agree, reward)
             j = 1 if i == 0 else 0
             agent.update(agree, reward, choice=choices[i],
-                partner_choice=choices[j], partner_input=ctxs[j], max_partner_reward=rewards[j])
+                partner_choice=choices[j], partner_input=ctxs[j], partner_reward=rewards[j])
 
         if agree:
             self.metrics.record('advantage', rewards[0] - rewards[1])
