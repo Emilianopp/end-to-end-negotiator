@@ -75,7 +75,7 @@ class RnnAgent(Agent):
         pass
 
     def update(self, agree, reward, choice=None, partner_choice=None,
-            partner_input=None, max_partner_reward=None):
+            partner_input=None, partner_reward=None):
         pass
 
     def read(self, inpt):
@@ -85,6 +85,7 @@ class RnnAgent(Agent):
         self.lang_hs.append(lang_hs.squeeze(1))
         self.words.append(self.model.word2var('THEM:').unsqueeze(0))
         self.words.append(Variable(inpt))
+        self.words = [(lambda x: x.unsqueeze(1) if len(x.shape) == 1 else x)(x)  for x in self.words ]
         assert (torch.cat(self.words).size(0) == torch.cat(self.lang_hs).size(0))
 
     def write(self, max_words=100):
@@ -113,6 +114,7 @@ class RnnAgent(Agent):
 
     def _choose(self, sample=False):
         sents = self.sents[:-1]
+        
         lens, rev_idxs, hid_idxs = self._make_idxs(sents)
         sel_out = self.sel_model.forward(sents, lens, rev_idxs, hid_idxs, Variable(self.ctx))
 
@@ -145,6 +147,304 @@ class RnnAgent(Agent):
         return choice
 
 
+class RnnRolloutAgent(RnnAgent):
+    def __init__(self, model, args, name='Alice', train=False, diverse=False):
+        super(RnnRolloutAgent, self).__init__(model, args, name)
+        self.ncandidate = 5
+        self.nrollout = 3
+        self.rollout_len = 100
+
+    def write(self, max_words):
+        best_score = -1
+        res = None
+        for _ in range(self.ncandidate):
+            _, move, move_lang_h, move_lang_hs = self.model.write(
+                self.lang_h, self.ctx_h, 100, self.args.temperature)
+
+            is_selection = len(move) == 1 and \
+                self.model.word_dict.get_word(move.data[0][0]) == '<selection>'
+
+            score = 0
+            for _ in range(self.nrollout):
+                # combined_lang_hs = self.lang_hs + [move_lang_hs]
+                combined_words = self.words + [self.model.word2var('YOU:'), move]
+
+                if not is_selection:
+                    # Complete the conversation with rollout_length samples
+                    _, rollout, _, rollout_lang_hs = self.model.write(
+                        move_lang_h, self.ctx_h, self.rollout_len, self.args.temperature,
+                        stop_tokens=['<selection>'], resume=True)
+                    # combined_lang_hs += [rollout_lang_hs]
+                    combined_words += [rollout]
+
+                # Choose items
+                rollout_score = None
+                combined_words = [(lambda x: x.unsqueeze(1) if len(x.size()) == 1 else x)(x) for x in combined_words]
+                # combined_lang_hs = torch.cat(combined_lang_hs)
+                combined_words = torch.cat(combined_words, dim = 0)
+                combined_words = self.prepare_words(combined_words)
+                rollout_choice, _, p_agree = self._choose1(sents=combined_words, sample=False)
+                rollout_score = self.domain.score(self.context, rollout_choice)
+                score += p_agree * rollout_score
+
+            # Take the candidate with the max expected reward
+            if score > best_score:
+                res = (move, move_lang_h, move_lang_hs)
+                best_score = score
+
+        outs, lang_h, lang_hs = res
+        self.lang_h = lang_h
+        self.lang_hs.append(lang_hs)
+        self.words.append(self.model.word2var('YOU:'))
+        self.words.append(outs)
+        self.sents.append(torch.cat([self.model.word2var('YOU:').unsqueeze(1), outs], 0))
+        return self._decode(outs, self.model.word_dict)
+    """
+    get words in the right format to be passed to _choose1
+    """
+    def prepare_words(self, combined_words):
+        res = []
+        start = 0
+        end = 0
+        for i in range(combined_words.size(0)):
+            if combined_words[i, :] == 0:
+                end = i + 1
+                res.append(combined_words[start:end, :])
+                start = end
+        return res
+
+    def _choose1(self, sents, sample=False):
+        lens, rev_idxs, hid_idxs = self._make_idxs(sents)
+        sel_out = self.sel_model.forward(sents, lens, rev_idxs, hid_idxs, Variable(self.ctx))
+
+        choices = self.domain.generate_choices(self.context, with_disagreement=True)
+
+        choices_logits = []
+        for i in range(self.domain.selection_length()):
+            idxs = [self.sel_model.item_dict.get_idx(c[i]) for c in choices]
+            idxs = Variable(torch.Tensor(idxs).long())
+            choices_logits.append(torch.gather(sel_out[i], 0, idxs).unsqueeze(1))
+
+        choice_logit = torch.sum(torch.cat(choices_logits, 1), 1, keepdim=True).squeeze(1)
+        choice_logit = choice_logit.sub(choice_logit.max(0)[0].item())
+        prob = F.softmax(choice_logit, dim=0)
+
+        if sample:
+            idx = prob.multinomial(1).detach()
+            logprob = F.log_softmax(choice_logit, dim=0).gather(0, idx)
+        else:
+            _, idx = prob.max(0, keepdim=True)
+            logprob = None
+
+        p_agree = prob[idx.item()]
+
+        # Pick only your choice
+        return choices[idx.item()][:self.domain.selection_length()], logprob, p_agree.item()
+
+class Node:
+    '''
+    this class is a mess but w.e 
+    '''
+    def __init__(self, move = None, lang_h= None, lang_hs = None, parent=None, sel =False):
+        self.parent = parent
+        self.n = 0
+        self.score = 0
+        self.children = [ ]
+        self.is_selection = sel
+        self.lang_h = lang_h
+        self.lang_hs = lang_hs
+        self.ucb = math.inf
+        self.outs = move
+
+    def get_ucb(self): 
+        if self.n == 0 :
+            self.ucb = math.inf
+        
+        # elif self.is_selection:  or self.score == 0 :
+        #     '''
+        #     this means n!=0 which means it has been visited
+        #     if it has been visited and is selection, close the node
+        #     if it has been visited and has a score of zero it means disagreement, close node
+        #     '''
+        #     self.ucb = -math.inf
+        else:
+            self.ucb = self.score/self.n + 2 * (
+                math.sqrt(math.log(self.parent.n) / self.n)
+            )
+        return self.ucb
+
+    def __lt__(self, other):
+        return self.ucb < other.ucb
+
+    def __le__(self, other):
+        return self.ucb <= other.ucb
+
+    def __eq__(self, other):
+        return self.ucb == other.ucb
+
+    def __ne__(self, other):
+        return self.ucb != other.ucb
+
+    def __gt__(self, other):
+        return self.ucb > other.ucb
+
+    def __ge__(self, other):
+        return self.ucb >= other.ucb
+
+
+class RnnMCTSAgent(RnnAgent):
+    def __init__(self, model,args, name="Alice", train=False, diverse=False):
+        super(RnnMCTSAgent, self).__init__(model, args, name)
+        # add variables to store the number of MCTS
+        self.nsim = 50
+        self.rollout_len = 100
+        self.n_tries = 5
+
+    def pickNode(self, curr_node: Node):
+        '''
+        picks max ucb node
+        '''
+        max_ucb = -math.inf
+        selection = None
+        for child in curr_node.children:
+            curr_ucb = child.get_ucb()
+            if curr_ucb > max_ucb:
+                max_ucb = curr_ucb
+                selection = child
+        return selection
+    
+    def expansion(self, curr_node: Node):
+        """
+        goes through all nodes until it reaches a leaf
+        """
+        if not curr_node.children:
+            return curr_node
+        selection = self.pickNode(curr_node)
+        return self.expansion(selection)
+    
+    
+    def backprop(self, curr_node: Node, score: float):
+        """
+        backpropagate scores throughout the tree
+        """
+        while True:
+            curr_node.score += score
+            curr_node.n += 1
+            if not curr_node.parent:
+                break
+            curr_node = curr_node.parent
+        return curr_node
+
+    def get_all_children_states(self, curr_node: Node, n_tries: int):
+        """
+        get a few possible dialogues given the current state
+        """
+        children = []
+        prev_moves = []
+        for _ in range(n_tries):
+            _, move, move_lang_h, move_lang_hs = self.model.write(
+                curr_node.lang_h, self.ctx_h, self.rollout_len, self.args.temperature)
+            is_selection = len(move) == 1 and \
+                self.model.word_dict.get_word(move.data[0][0]) == '<selection>'
+            if not any([torch.equal(move,x) for x in prev_moves]):
+                children.append(Node(parent = curr_node, lang_h=move_lang_h, lang_hs = move_lang_hs, move = move, sel=is_selection))
+                prev_moves.append(move)
+        return children
+
+    def prepare_words(self, combined_words):
+        """
+        get words in the right format to be passed to _choose1
+        """
+        res = []
+        start = 0
+        end = 0
+        for i in range(combined_words.size(0)):
+            if combined_words[i, :] == 0:
+                end = i + 1
+                res.append(combined_words[start:end, :])
+                start = end
+        return res
+
+    def _choose1(self, sents, sample=False):
+        lens, rev_idxs, hid_idxs = self._make_idxs(sents)
+        sel_out = self.sel_model.forward(sents, lens, rev_idxs, hid_idxs, Variable(self.ctx))
+
+        choices = self.domain.generate_choices(self.context, with_disagreement=True)
+
+        choices_logits = []
+        for i in range(self.domain.selection_length()):
+            idxs = [self.sel_model.item_dict.get_idx(c[i]) for c in choices]
+            idxs = Variable(torch.Tensor(idxs).long())
+            choices_logits.append(torch.gather(sel_out[i], 0, idxs).unsqueeze(1))
+
+        choice_logit = torch.sum(torch.cat(choices_logits, 1), 1, keepdim=True).squeeze(1)
+        choice_logit = choice_logit.sub(choice_logit.max(0)[0].item())
+        prob = F.softmax(choice_logit, dim=0)
+
+        if sample:
+            idx = prob.multinomial(1).detach()
+            logprob = F.log_softmax(choice_logit, dim=0).gather(0, idx)
+        else:
+            _, idx = prob.max(0, keepdim=True)
+            logprob = None
+
+        p_agree = prob[idx.item()]
+
+        # Pick only your choice
+        return choices[idx.item()][:self.domain.selection_length()], logprob, p_agree.item()
+
+    def write(self, max_words):
+        """
+        new write method for generating turn
+        """
+        root = Node(lang_h = self.lang_h)
+        root.children = self.get_all_children_states(root, self.n_tries)
+        
+        for _ in range(self.nsim): 
+            score = 0
+            '''
+            get max node for traversal
+            '''
+            candidate = self.expansion(root)
+            
+            if candidate.n != 0:
+                candidate.children = self.get_all_children_states(candidate, self.n_tries)
+                candidate = candidate.children[0]
+            
+
+            combined_words = self.words + [self.model.word2var('YOU:'), candidate.outs]
+            # print(combined_words)
+            if not candidate.is_selection:
+                """"
+                do full rollout and get the score if its not a terminal node
+                """
+                _, rollout, _, rollout_lang_hs = self.model.write(
+                        candidate.lang_h, self.ctx_h, self.rollout_len, self.args.temperature,
+                        stop_tokens=['<selection>'], resume=True)
+                combined_words += [rollout]
+            
+            combined_words = [(lambda x: x.unsqueeze(1) if len(x.size()) == 1 else x)(x) for x in combined_words]
+            combined_words = torch.cat(combined_words, dim = 0)
+            combined_words = self.prepare_words(combined_words)
+            rollout_choice, _, p_agree = self._choose1(sents=combined_words, sample=False)
+            rollout_score = self.domain.score(self.context, rollout_choice)
+            score += p_agree * rollout_score
+            # score += rollout_score
+
+            self.backprop(candidate, score)
+            
+        max_score = -math.inf
+        for child in root.children: 
+            if child.score / child.n > max_score:
+                bestChild = child
+                max_score = child.score / child.n
+        self.lang_h = bestChild.lang_h
+        self.lang_hs.append(bestChild.lang_hs)
+        self.words.append(self.model.word2var('YOU:'))
+        self.words.append(bestChild.outs)
+        self.sents.append(torch.cat([self.model.word2var('YOU:').unsqueeze(1), bestChild.outs], 0))
+        return self._decode(bestChild.outs, self.model.word_dict)
+    
 class HierarchicalAgent(RnnAgent):
     def __init__(self, model, args, name='Alice'):
         super(HierarchicalAgent, self).__init__(model, args, name)
@@ -242,60 +542,6 @@ class HierarchicalAgent(RnnAgent):
 
         # Pick only your choice
         return choices[idx.data[0]][:self.domain.selection_length()], logprob, p_agree
-
-
-class RnnRolloutAgent(RnnAgent):
-    def __init__(self, model, args, name='Alice', train=False):
-        super(RnnRolloutAgent, self).__init__(model, args, name)
-        self.ncandidate = 5
-        self.nrollout = 3
-        self.rollout_len = 100
-
-    def write(self, max_words):
-        best_score = -1
-        res = None
-
-        for _ in range(self.ncandidate):
-            _, move, move_lang_h, move_lang_hs = self.model.write(
-                self.lang_h, self.ctx_h, 100, self.args.temperature)
-
-            is_selection = len(move) == 1 and \
-                self.model.word_dict.get_word(move.data[0][0]) == '<selection>'
-
-            score = 0
-            for _ in range(self.nrollout):
-                combined_lang_hs = self.lang_hs + [move_lang_hs]
-                combined_words = self.words + [self.model.word2var('YOU:'), move]
-
-                if not is_selection:
-                    # Complete the conversation with rollout_length samples
-                    _, rollout, _, rollout_lang_hs = self.model.write(
-                        move_lang_h, self.ctx_h, self.rollout_len, self.args.temperature,
-                        stop_tokens=['<selection>'], resume=True)
-                    combined_lang_hs += [rollout_lang_hs]
-                    combined_words += [rollout]
-
-                # Choose items
-                rollout_score = None
-
-                combined_lang_hs = torch.cat(combined_lang_hs)
-                combined_words = torch.cat(combined_words)
-                rollout_choice, _, p_agree = self._choose(combined_lang_hs, combined_words, sample=False)
-                rollout_score = self.domain.score(self.context, rollout_choice)
-                score += p_agree * rollout_score
-
-            # Take the candidate with the max expected reward
-            if score > best_score:
-                res = (move, move_lang_h, move_lang_hs)
-                best_score = score
-
-        outs, lang_h, lang_hs = res
-        self.lang_h = lang_h
-        self.lang_hs.append(lang_hs)
-        self.words.append(self.model.word2var('YOU:'))
-        self.words.append(outs)
-        return self._decode(outs, self.model.word_dict)
-
 
 class StrategyAgent(HierarchicalAgent):
     def __init__(self, model, args, name='Alice', train=False, diverse=False):
@@ -786,6 +1032,8 @@ class RlAgent(RnnAgent):
     def __init__(self, model, args, name='Alice', train=False):
         self.train = train
         super(RlAgent, self).__init__(model, args, name=name)
+        self.model.train()
+        self.sel_model.train()
         self.opt = optim.RMSprop(
             self.model.parameters(),
             lr=args.rl_lr,
@@ -812,7 +1060,7 @@ class RlAgent(RnnAgent):
             100, self.args.temperature)
         self.logprobs.extend(logprobs)
         self.lang_hs.append(lang_hs)
-        self.words.append(self.model.word2var('YOU:'))
+        self.words.append(self.model.word2var('YOU:').unsqueeze(0))
         self.words.append(outs)
         assert (torch.cat(self.words).size()[0] == torch.cat(self.lang_hs).size()[0])
         return self._decode(outs, self.model.word_dict)
