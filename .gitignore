@@ -1,5 +1,5 @@
 __pycache__
-.out
-.th
-.log
-.sh
+*.out
+*.th
+*.log
+*.sh
