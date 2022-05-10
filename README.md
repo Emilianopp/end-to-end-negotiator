@@ -1,6 +1,7 @@
 # Extensions
 
-This repository encompasses our effort to extend and improve the methods initially proposd by [Yarats & Lewis(2018)](https://arxiv.org/abs/1712.05846). 
+This repository encompasses our effort to extend and improve the methods initially proposd by [Yarats & Lewis(2018)](https://arxiv.org/abs/1712.05846).
+
 On this repository our presented extensions include: 
 * Addidtion of transformers 
 * Implemmentation of Monte Carlo Tree Search to utterence rollouts
