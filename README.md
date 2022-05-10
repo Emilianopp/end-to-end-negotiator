@@ -1,3 +1,12 @@
+# Extensions
+
+This repository encompasses our effort to extend and improve the methods initially proposd by [Yarats & Lewis(2018)](https://arxiv.org/abs/1712.05846). 
+On this repository our presented extensions include: 
+* Addidtion of transformers 
+* Implemmentation of Monte Carlo Tree Search to utterence rollouts
+
+A link to the findings and report can be found [here](https://drive.google.com/file/d/1I3AYbXPK0UYAz3hkYdcP1Un8SdyKsyhu/view?usp=sharing)
+
 # Introduction
 This is a [PyTorch](http://pytorch.org/) implementation of the following research papers:
  * (1) [Hierarchical Text Generation and Planning for Strategic Dialogue](https://arxiv.org/abs/1712.05846)
